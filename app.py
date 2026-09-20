@@ -1,10 +1,71 @@
 import io
 import streamlit as st
 import ezdxf
-from ezdxf.enums import TextEntityAlignment
 
 # ==============================================================================
-# 1. محرك الأوتوكاد والرسم الهندسي (CAD & DXF Generator Engine)
+# 1. دالة رسم جدول الحصر المضمونة (Robust Line-Based Table)
+# ==============================================================================
+def draw_bom_table(msp, start_x, start_y, data):
+    """
+    رسم جدول البيانات باستخدام الخطوط والنصوص القياسية لضمان التوافق التام
+    """
+    col_widths = [500, 700, 1000]  # عرض الأعمدة الثلاثة (مم)
+    row_height = 80               # ارتفاع السطر (مم)
+    num_rows = len(data)
+    total_width = sum(col_widths)
+    total_height = num_rows * row_height
+
+    # 1. رسم الحدود الخارجية للجدول
+    msp.add_polyline2d(
+        [
+            (start_x, start_y),
+            (start_x + total_width, start_y),
+            (start_x + total_width, start_y - total_height),
+            (start_x, start_y - total_height)
+        ],
+        close=True,
+        dxfattribs={"layer": "A-TABLE"}
+    )
+
+    # 2. رسم الأسطر الأفقية
+    for r in range(1, num_rows):
+        y = start_y - (r * row_height)
+        msp.add_line(
+            (start_x, y),
+            (start_x + total_width, y),
+            dxfattribs={"layer": "A-TABLE"}
+        )
+
+    # 3. رسم الفواصل الرأسية بين الأعمدة
+    curr_x = start_x
+    for w in col_widths[:-1]:
+        curr_x += w
+        msp.add_line(
+            (curr_x, start_y),
+            (curr_x, start_y - total_height),
+            dxfattribs={"layer": "A-TABLE"}
+        )
+
+    # 4. كتابة النصوص داخل الخلايا
+    for r_idx, row in enumerate(data):
+        cell_y = start_y - (r_idx * row_height) - (row_height / 2.0) - 10
+        curr_x = start_x
+        for c_idx, text in enumerate(row):
+            cell_x = curr_x + 20  # هامش أيسر
+            text_height = 25 if r_idx == 0 else 20
+            msp.add_text(
+                str(text),
+                dxfattribs={
+                    "layer": "A-TABLE",
+                    "height": text_height,
+                    "insert": (cell_x, cell_y)
+                }
+            )
+            curr_x += col_widths[c_idx]
+
+
+# ==============================================================================
+# 2. محرك الأوتوكاد والرسم الهندسي (CAD & DXF Generator Engine)
 # ==============================================================================
 def generate_glass_dxf(
     template: str,
@@ -19,10 +80,7 @@ def generate_glass_dxf(
     hardware_finish: str,
     gaps: dict
 ) -> bytes:
-    """
-    محرك توليد ملف الأوتوكاد DXF التلقائي شاملاً الواجهة، الألواح، الخلوصات، وجدول الـ BOM
-    """
-    # استخراج الخوصات الاسمية
+
     g_bot = gaps["G_bot"]["nom"]
     g_top = gaps["G_top"]["nom"]
     g_mid = gaps["G_mid"]["nom"]
@@ -42,7 +100,7 @@ def generate_glass_dxf(
 
     h_door_panel = H_door - g_bot - g_top if num_doors > 0 else 0.0
 
-    # حساب الوزن الشامل لوزن لوح الباب (+10% معامل أمان)
+    # حساب الوزن الشامل لدلفة الباب (+10% معامل أمان)
     door_weight_raw = (w_single_door / 1000.0) * (h_door_panel / 1000.0) * glass_thick * 2.5
     door_weight_total = door_weight_raw * 1.10 if num_doors > 0 else 0.0
 
@@ -63,11 +121,11 @@ def generate_glass_dxf(
     msp = doc.modelspace()
 
     # إنشاء الطبقات والألوان
-    doc.layers.add("A-WALL-OUTLINE", color=2)   # أصفر (الفتحة المعمارية)
-    doc.layers.add("A-GLASS-FIXED", color=4)    # سماوي (الزجاج الثابت والفرامة)
-    doc.layers.add("A-GLASS-DOOR", color=1)     # أحمر (الأبواب المتحركة)
-    doc.layers.add("A-HARDWARE", color=3)       # أخضر (الإكسسوارات والماكينة)
-    doc.layers.add("A-TABLE", color=7)          # أبيض (جدول البيانات BOM)
+    doc.layers.add("A-WALL-OUTLINE", color=2)   # أصفر
+    doc.layers.add("A-GLASS-FIXED", color=4)    # سماوي
+    doc.layers.add("A-GLASS-DOOR", color=1)     # أحمر
+    doc.layers.add("A-HARDWARE", color=3)       # أخضر
+    doc.layers.add("A-TABLE", color=7)          # أبيض
 
     # 1. رسم حدود الفتحة المعمارية الخارجية
     msp.add_lwpolyline(
@@ -109,7 +167,6 @@ def generate_glass_dxf(
         # دلف الأبواب والإكسسوارات
         if template == "B":  # باب مزدوج
             x_d1 = X_door + g_side
-            # الدلفة اليسرى
             msp.add_lwpolyline(
                 [
                     (x_d1, g_bot),
@@ -120,7 +177,6 @@ def generate_glass_dxf(
                 close=True,
                 dxfattribs={"layer": "A-GLASS-DOOR"}
             )
-            # الدلفة اليمنى
             x_d2 = x_d1 + w_single_door + g_mid
             msp.add_lwpolyline(
                 [
@@ -132,7 +188,7 @@ def generate_glass_dxf(
                 close=True,
                 dxfattribs={"layer": "A-GLASS-DOOR"}
             )
-            # رسم تمثيلي لماكينات الأرضية
+            # تمثيل ماكينات الأرضية
             msp.add_lwpolyline([(x_d1, 0), (x_d1 + 120, 0), (x_d1 + 120, g_bot), (x_d1, g_bot)], close=True, dxfattribs={"layer": "A-HARDWARE"})
             msp.add_lwpolyline([(x_d2 + w_single_door - 120, 0), (x_d2 + w_single_door, 0), (x_d2 + w_single_door, g_bot), (x_d2 + w_single_door - 120, g_bot)], close=True, dxfattribs={"layer": "A-HARDWARE"})
 
@@ -148,7 +204,6 @@ def generate_glass_dxf(
                 close=True,
                 dxfattribs={"layer": "A-GLASS-DOOR"}
             )
-            # رسم تمثيلي لماكينة الأرضية
             msp.add_lwpolyline([(x_d, 0), (x_d + 120, 0), (x_d + 120, g_bot), (x_d, g_bot)], close=True, dxfattribs={"layer": "A-HARDWARE"})
 
         # اللوح الثابت الأيمن
@@ -178,18 +233,7 @@ def generate_glass_dxf(
             dxfattribs={"layer": "A-GLASS-FIXED"}
         )
 
-    # 3. إنشاء جدول التقطيع والمواصفات الفنية (BOM Table)
-    table_x = W_wall + 500
-    table_y = H_wall
-    table = msp.add_table(
-        insert=(table_x, table_y),
-        nrows=9,
-        ncols=3,
-        width=2200,
-        height=950,
-        dxfattribs={"layer": "A-TABLE"}
-    )
-
+    # 3. إعداد بيانات الجدول ورسمه
     bom_data = [
         ["ITEM / SPECIFICATION", "CALCULATED VALUE", "TOLERANCES & NOTES"],
         ["Partition Model", f"Template Model ({template})", f"Overall Size: {W_wall:.0f}x{H_wall:.0f} mm"],
@@ -202,20 +246,16 @@ def generate_glass_dxf(
         ["Factory Edge Rules", "Flat Polish All Edges & Drill", "DO NOT CUT OR DRILL AFTER TEMPERING"]
     ]
 
-    for r, row in enumerate(bom_data):
-        for c, val in enumerate(row):
-            cell = table.get_cell(r, c)
-            cell.text = str(val)
-            cell.text_alignment = TextEntityAlignment.MIDDLE_CENTER
+    draw_bom_table(msp, start_x=W_wall + 500, start_y=H_wall, data=bom_data)
 
-    # تصدير كملف بايتات لـ Streamlit
+    # تصدير الملف
     stream = io.StringIO()
     doc.write(stream)
     return stream.getvalue().encode("utf-8")
 
 
 # ==============================================================================
-# 2. واجهة المستخدم التفاعلية (Streamlit UI Application)
+# 3. واجهة المستخدم التفاعلية (Streamlit UI Application)
 # ==============================================================================
 def main():
     st.set_page_config(page_title="حاسبة ورسومات الزجاج السكويريت", layout="wide", page_icon="📐")
@@ -223,11 +263,7 @@ def main():
     st.title("📐 تطبيق تفصيل الزجاج السكويريت وتوليد رسومات الأوتوكاد")
     st.caption("برنامج حساب الخلوصات، الأوزان، قدرة الماكينات الأرضية، وتوليد ملفات DXF معتمدة")
 
-    # --------------------------------------------------------------------------
-    # الشريط الجانبي: مواصفات الزجاج والفواصل
-    # --------------------------------------------------------------------------
     st.sidebar.header("⚙️ مواصفات الزجاج والإكسسوارات")
-
     glass_thick = st.sidebar.selectbox("سمك الزجاج (مم)", [10, 12, 15, 19], index=1)
     glass_type = st.sidebar.selectbox("نوع الزجاج", ["شفاف (Clear)", "سوبر شفاف (Extra Clear)", "فاميه / مظلل (Tinted)", "مثلج (Frosted)"])
     glass_color = st.sidebar.selectbox("لون الزجاج", ["بدون / شفاف", "رمادي (Grey)", "برونزي (Bronze)", "أخضر (Dark Green)", "أزرق (Blue)"])
@@ -250,9 +286,6 @@ def main():
         "G_frame": {"min": 4.0, "nom": g_frame_nom, "max": 10.0}
     }
 
-    # --------------------------------------------------------------------------
-    # الشاشة الرئيسية: النماذج والمدخلات
-    # --------------------------------------------------------------------------
     col_template, col_dims = st.columns([1, 2])
 
     with col_template:
@@ -282,9 +315,6 @@ def main():
         else:
             W_door, H_door, X_door = 0.0, 0.0, 0.0
 
-    # --------------------------------------------------------------------------
-    # الحسابات المباشرة والتوصيات
-    # --------------------------------------------------------------------------
     st.markdown("---")
     st.subheader("📊 النتائج والتوصيات الفنية المباشرة")
 
@@ -315,11 +345,8 @@ def main():
         m4.metric("قدرة الماكينة الأرضية", "Heavy Duty EN5", delta="سعة حتى 150 كجم")
     else:
         m4.metric("قدرة الماكينة الأرضية", "تجاوز الوزن!", delta="-خطر غير آمن", delta_color="inverse")
-        st.error("⚠️ تحذير فني: وزن دلفة الباب يتجاوز 150 كجم! يجب تقليل أبعاد الباب أو استخدام سمك زجاج أقل أو نظام مفصلات حوائط شاقة بدلاً من الماكينات القياسية.")
+        st.error("⚠️ تحذير فني: وزن دلفة الباب يتجاوز 150 كجم! يجب تقليل أبعاد الباب أو استخدام سمك زجاج أقل أو نظام مفصلات شاقة.")
 
-    # --------------------------------------------------------------------------
-    # توليد وتنزيل ملف الأوتوكاد DXF
-    # --------------------------------------------------------------------------
     st.markdown("---")
     st.subheader("💾 تصدير الرسم التنفيذي بصيغة أوتوكاد DXF")
 
