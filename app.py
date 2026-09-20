@@ -3,19 +3,49 @@ import streamlit as st
 import ezdxf
 
 # ==============================================================================
-# 1. دالة رسم جدول الحصر المضمونة (Robust Line-Based Table)
+# 1. دالة تقسيم الألواح الثابتة (Sub-division Logic)
+# ==============================================================================
+def calculate_panel_subdivision(total_w: float, max_w: float, gap: float, x_start: float, y_start: float, height: float):
+    """
+    تقسيم المساحات الثابتة إلى ألواح متساوية لا تتجاوز أقصى عرض مسموح
+    """
+    if total_w <= 0:
+        return [], 0, 0.0
+
+    # حساب عدد الألواح المطلوبة
+    num_panels = int(total_w // max_w) + (1 if total_w % max_w > 0 else 0)
+    if num_panels == 0:
+        num_panels = 1
+
+    # عرض اللوح الواحد بعد خصم الفواصل بين الألواح المتجاورة
+    w_panel = (total_w - ((num_panels - 1) * gap)) / num_panels
+
+    panels = []
+    curr_x = x_start
+    for _ in range(num_panels):
+        p_box = [
+            (curr_x, y_start),
+            (curr_x + w_panel, y_start),
+            (curr_x + w_panel, y_start + height),
+            (curr_x, y_start + height)
+        ]
+        panels.append(p_box)
+        curr_x += w_panel + gap
+
+    return panels, num_panels, w_panel
+
+
+# ==============================================================================
+# 2. دالة رسم جدول الحصر المضمونة (Line-Based BOM Table)
 # ==============================================================================
 def draw_bom_table(msp, start_x, start_y, data):
-    """
-    رسم جدول البيانات باستخدام الخطوط والنصوص القياسية لضمان التوافق التام
-    """
-    col_widths = [500, 700, 1000]  # عرض الأعمدة الثلاثة (مم)
+    col_widths = [550, 750, 1100]  # عرض الأعمدة الثلاثة (مم)
     row_height = 80               # ارتفاع السطر (مم)
     num_rows = len(data)
     total_width = sum(col_widths)
     total_height = num_rows * row_height
 
-    # 1. رسم الحدود الخارجية للجدول
+    # رسم الحدود الخارجية
     msp.add_polyline2d(
         [
             (start_x, start_y),
@@ -27,32 +57,24 @@ def draw_bom_table(msp, start_x, start_y, data):
         dxfattribs={"layer": "A-TABLE"}
     )
 
-    # 2. رسم الأسطر الأفقية
+    # رسم الأسطر الأفقية
     for r in range(1, num_rows):
         y = start_y - (r * row_height)
-        msp.add_line(
-            (start_x, y),
-            (start_x + total_width, y),
-            dxfattribs={"layer": "A-TABLE"}
-        )
+        msp.add_line((start_x, y), (start_x + total_width, y), dxfattribs={"layer": "A-TABLE"})
 
-    # 3. رسم الفواصل الرأسية بين الأعمدة
+    # رسم الفواصل الرأسية
     curr_x = start_x
     for w in col_widths[:-1]:
         curr_x += w
-        msp.add_line(
-            (curr_x, start_y),
-            (curr_x, start_y - total_height),
-            dxfattribs={"layer": "A-TABLE"}
-        )
+        msp.add_line((curr_x, start_y), (curr_x, start_y - total_height), dxfattribs={"layer": "A-TABLE"})
 
-    # 4. كتابة النصوص داخل الخلايا
+    # كتابة النصوص
     for r_idx, row in enumerate(data):
         cell_y = start_y - (r_idx * row_height) - (row_height / 2.0) - 10
         curr_x = start_x
         for c_idx, text in enumerate(row):
-            cell_x = curr_x + 20  # هامش أيسر
-            text_height = 25 if r_idx == 0 else 20
+            cell_x = curr_x + 20
+            text_height = 24 if r_idx == 0 else 18
             msp.add_text(
                 str(text),
                 dxfattribs={
@@ -65,7 +87,7 @@ def draw_bom_table(msp, start_x, start_y, data):
 
 
 # ==============================================================================
-# 2. محرك الأوتوكاد والرسم الهندسي (CAD & DXF Generator Engine)
+# 3. محرك الأوتوكاد والتفاصيل الإنشائية (CAD DXF Engine)
 # ==============================================================================
 def generate_glass_dxf(
     template: str,
@@ -74,6 +96,9 @@ def generate_glass_dxf(
     W_door: float,
     H_door: float,
     X_door: float,
+    max_glass_width: float,
+    chassis_type: str,
+    anchor_type: str,
     glass_thick: int,
     glass_type: str,
     glass_color: str,
@@ -88,23 +113,23 @@ def generate_glass_dxf(
     g_frame = gaps["G_frame"]["nom"]
 
     # حساب هندسة ودلف الأبواب
-    if template == "B":  # باب مزدوج
+    if template == "B":
         w_single_door = (W_door - (2 * g_side) - g_mid) / 2.0
         num_doors = 2
-    elif template in ["A", "C"]:  # باب مفرد
+    elif template in ["A", "C"]:
         w_single_door = W_door - (2 * g_side)
         num_doors = 1
-    else:  # قاطع ثابت بدون أبواب (D)
+    else:
         w_single_door = 0.0
         num_doors = 0
 
     h_door_panel = H_door - g_bot - g_top if num_doors > 0 else 0.0
 
-    # حساب الوزن الشامل لدلفة الباب (+10% معامل أمان)
+    # حساب وزن الدلفة مع 10% أمان
     door_weight_raw = (w_single_door / 1000.0) * (h_door_panel / 1000.0) * glass_thick * 2.5
     door_weight_total = door_weight_raw * 1.10 if num_doors > 0 else 0.0
 
-    # اختيار قدرة الماكينة الأرضية
+    # قدرة الماكينة
     if num_doors == 0:
         spring_model = "N/A (Fixed Partition)"
     elif door_weight_total <= 75:
@@ -120,35 +145,29 @@ def generate_glass_dxf(
     doc = ezdxf.new("R2010")
     msp = doc.modelspace()
 
-    # إنشاء الطبقات والألوان
     doc.layers.add("A-WALL-OUTLINE", color=2)   # أصفر
     doc.layers.add("A-GLASS-FIXED", color=4)    # سماوي
     doc.layers.add("A-GLASS-DOOR", color=1)     # أحمر
+    doc.layers.add("A-CHASSIS", color=6)        # بنفسجي (القطاعات والشاسية)
     doc.layers.add("A-HARDWARE", color=3)       # أخضر
     doc.layers.add("A-TABLE", color=7)          # أبيض
 
-    # 1. رسم حدود الفتحة المعمارية الخارجية
-    msp.add_lwpolyline(
-        [(0, 0), (W_wall, 0), (W_wall, H_wall), (0, H_wall)],
-        close=True,
-        dxfattribs={"layer": "A-WALL-OUTLINE"}
-    )
+    # 1. رسم حدود الفتحة المعمارية
+    msp.add_lwpolyline([(0, 0), (W_wall, 0), (W_wall, H_wall), (0, H_wall)], close=True, dxfattribs={"layer": "A-WALL-OUTLINE"})
 
-    # 2. رسم ألواح الزجاج بناءً على النموذج
+    total_fixed_panels_count = 0
+    total_chassis_length_mm = 0.0
+
+    # 2. رسم ألواح الزجاج وتقسيمها
     if template in ["A", "B", "C"]:
-        # اللوح الثابت الأيسر
-        w_left_fixed = X_door - g_frame - (g_side / 2.0)
-        if w_left_fixed > 0:
-            msp.add_lwpolyline(
-                [
-                    (g_frame, g_frame),
-                    (g_frame + w_left_fixed, g_frame),
-                    (g_frame + w_left_fixed, H_wall - g_frame),
-                    (g_frame, H_wall - g_frame)
-                ],
-                close=True,
-                dxfattribs={"layer": "A-GLASS-FIXED"}
-            )
+        # اللوح الثابت الأيسر (وتقسيمه)
+        w_left_total = X_door - g_frame - (g_side / 2.0)
+        left_panels, n_left, w_left_single = calculate_panel_subdivision(
+            w_left_total, max_glass_width, g_mid, g_frame, g_frame, H_wall - (2 * g_frame)
+        )
+        for p_box in left_panels:
+            msp.add_lwpolyline(p_box, close=True, dxfattribs={"layer": "A-GLASS-FIXED"})
+        total_fixed_panels_count += n_left
 
         # الفرامة العلوية فوق الباب
         h_transom = H_wall - H_door - g_frame
@@ -163,87 +182,55 @@ def generate_glass_dxf(
                 close=True,
                 dxfattribs={"layer": "A-GLASS-FIXED"}
             )
+            total_fixed_panels_count += 1
 
-        # دلف الأبواب والإكسسوارات
-        if template == "B":  # باب مزدوج
+        # دلف الأبواب
+        if template == "B":
             x_d1 = X_door + g_side
-            msp.add_lwpolyline(
-                [
-                    (x_d1, g_bot),
-                    (x_d1 + w_single_door, g_bot),
-                    (x_d1 + w_single_door, g_bot + h_door_panel),
-                    (x_d1, g_bot + h_door_panel)
-                ],
-                close=True,
-                dxfattribs={"layer": "A-GLASS-DOOR"}
-            )
+            msp.add_lwpolyline([(x_d1, g_bot), (x_d1 + w_single_door, g_bot), (x_d1 + w_single_door, g_bot + h_door_panel), (x_d1, g_bot + h_door_panel)], close=True, dxfattribs={"layer": "A-GLASS-DOOR"})
             x_d2 = x_d1 + w_single_door + g_mid
-            msp.add_lwpolyline(
-                [
-                    (x_d2, g_bot),
-                    (x_d2 + w_single_door, g_bot),
-                    (x_d2 + w_single_door, g_bot + h_door_panel),
-                    (x_d2, g_bot + h_door_panel)
-                ],
-                close=True,
-                dxfattribs={"layer": "A-GLASS-DOOR"}
-            )
-            # تمثيل ماكينات الأرضية
+            msp.add_lwpolyline([(x_d2, g_bot), (x_d2 + w_single_door, g_bot), (x_d2 + w_single_door, g_bot + h_door_panel), (x_d2, g_bot + h_door_panel)], close=True, dxfattribs={"layer": "A-GLASS-DOOR"})
             msp.add_lwpolyline([(x_d1, 0), (x_d1 + 120, 0), (x_d1 + 120, g_bot), (x_d1, g_bot)], close=True, dxfattribs={"layer": "A-HARDWARE"})
             msp.add_lwpolyline([(x_d2 + w_single_door - 120, 0), (x_d2 + w_single_door, 0), (x_d2 + w_single_door, g_bot), (x_d2 + w_single_door - 120, g_bot)], close=True, dxfattribs={"layer": "A-HARDWARE"})
-
-        else:  # باب مفرد (A أو C)
+        else:
             x_d = X_door + g_side
-            msp.add_lwpolyline(
-                [
-                    (x_d, g_bot),
-                    (x_d + w_single_door, g_bot),
-                    (x_d + w_single_door, g_bot + h_door_panel),
-                    (x_d, g_bot + h_door_panel)
-                ],
-                close=True,
-                dxfattribs={"layer": "A-GLASS-DOOR"}
-            )
+            msp.add_lwpolyline([(x_d, g_bot), (x_d + w_single_door, g_bot), (x_d + w_single_door, g_bot + h_door_panel), (x_d, g_bot + h_door_panel)], close=True, dxfattribs={"layer": "A-GLASS-DOOR"})
             msp.add_lwpolyline([(x_d, 0), (x_d + 120, 0), (x_d + 120, g_bot), (x_d, g_bot)], close=True, dxfattribs={"layer": "A-HARDWARE"})
 
-        # اللوح الثابت الأيمن
+        # اللوح الثابت الأيمن (وتقسيمه)
         x_right_start = X_door + W_door + (g_side / 2.0)
-        w_right_fixed = W_wall - x_right_start - g_frame
-        if w_right_fixed > 0:
-            msp.add_lwpolyline(
-                [
-                    (x_right_start, g_frame),
-                    (x_right_start + w_right_fixed, g_frame),
-                    (x_right_start + w_right_fixed, H_wall - g_frame),
-                    (x_right_start, H_wall - g_frame)
-                ],
-                close=True,
-                dxfattribs={"layer": "A-GLASS-FIXED"}
-            )
+        w_right_total = W_wall - x_right_start - g_frame
+        right_panels, n_right, w_right_single = calculate_panel_subdivision(
+            w_right_total, max_glass_width, g_mid, x_right_start, g_frame, H_wall - (2 * g_frame)
+        )
+        for p_box in right_panels:
+            msp.add_lwpolyline(p_box, close=True, dxfattribs={"layer": "A-GLASS-FIXED"})
+        total_fixed_panels_count += n_right
+
+        # حساب طول الشاسية المطلوب (المحيط العلوي والسفلي والجانبي للثوابت)
+        total_chassis_length_mm = (w_left_total * 2) + (w_right_total * 2) + (W_door * 2 if h_transom > 0 else 0) + (H_wall * 2)
 
     elif template == "D":  # قاطع ثابت كامل
-        msp.add_lwpolyline(
-            [
-                (g_frame, g_frame),
-                (W_wall - g_frame, g_frame),
-                (W_wall - g_frame, H_wall - g_frame),
-                (g_frame, H_wall - g_frame)
-            ],
-            close=True,
-            dxfattribs={"layer": "A-GLASS-FIXED"}
+        full_panels, n_full, w_full_single = calculate_panel_subdivision(
+            W_wall - (2 * g_frame), max_glass_width, g_mid, g_frame, g_frame, H_wall - (2 * g_frame)
         )
+        for p_box in full_panels:
+            msp.add_lwpolyline(p_box, close=True, dxfattribs={"layer": "A-GLASS-FIXED"})
+        total_fixed_panels_count = n_full
+        total_chassis_length_mm = (W_wall * 2) + (H_wall * 2)
 
-    # 3. إعداد بيانات الجدول ورسمه
+    # 3. إعداد بيانات جدول الحصر والتركيب (BOM Table)
     bom_data = [
-        ["ITEM / SPECIFICATION", "CALCULATED VALUE", "TOLERANCES & NOTES"],
+        ["ITEM / SPECIFICATION", "CALCULATED VALUE", "INSTALLATION & FIXING NOTES"],
         ["Partition Model", f"Template Model ({template})", f"Overall Size: {W_wall:.0f}x{H_wall:.0f} mm"],
-        ["Glass Specification", f"{glass_thick}mm Tempered ({glass_type})", f"Glass Color: {glass_color}"],
+        ["Glass Specs & Finish", f"{glass_thick}mm Tempered ({glass_type})", f"Glass Color: {glass_color}"],
         ["Door Leaf Cut Size", f"{w_single_door:.1f} x {h_door_panel:.1f} mm" if num_doors > 0 else "N/A", f"G_bot={g_bot}mm | G_top={g_top}mm"],
-        ["Leaf Weight (Raw / Safety)", f"{door_weight_raw:.1f} kg / {door_weight_total:.1f} kg" if num_doors > 0 else "N/A", "Includes +10% Operational Safety"],
-        ["Floor Spring Capacity", spring_model, f"Hardware Finish: {hardware_finish}"],
-        ["Bottom & Top Gaps", f"G_bot={g_bot}mm | G_top={g_top}mm", f"Limits: Bot[{gaps['G_bot']['min']}-{gaps['G_bot']['max']}]mm"],
-        ["Side & Frame Gaps", f"G_side={g_side}mm | G_frame={g_frame}mm", f"Limits: Frame[{gaps['G_frame']['min']}-{gaps['G_frame']['max']}]mm"],
-        ["Factory Edge Rules", "Flat Polish All Edges & Drill", "DO NOT CUT OR DRILL AFTER TEMPERING"]
+        ["Leaf Weight & Spring", f"{door_weight_total:.1f} kg / {spring_model}", f"Finish: {hardware_finish}"],
+        ["Fixed Panels Sub-Division", f"Total Fixed Panels: {total_fixed_panels_count} Pcs", f"Max Width Limit: {max_glass_width:.0f} mm"],
+        ["Mounting Chassis / Profile", chassis_type, f"Total Length Needed: {total_chassis_length_mm/1000.0:.2f} L.M."],
+        ["Anchoring Fasteners", anchor_type, "Fixing Pitch: @ 400mm c/c Max"],
+        ["Sealant & Setting Blocks", "Structural Silicone + EPDM Blocks", "EPDM Blocks (5mm) under base edges"],
+        ["Quality & Safety Rules", "Flat Polish Edges All Around", "DO NOT CUT OR DRILL AFTER TEMPERING"]
     ]
 
     draw_bom_table(msp, start_x=W_wall + 500, start_y=H_wall, data=bom_data)
@@ -255,14 +242,15 @@ def generate_glass_dxf(
 
 
 # ==============================================================================
-# 3. واجهة المستخدم التفاعلية (Streamlit UI Application)
+# 4. واجهة المستخدم التفاعلية (Streamlit UI Application)
 # ==============================================================================
 def main():
     st.set_page_config(page_title="حاسبة ورسومات الزجاج السكويريت", layout="wide", page_icon="📐")
 
     st.title("📐 تطبيق تفصيل الزجاج السكويريت وتوليد رسومات الأوتوكاد")
-    st.caption("برنامج حساب الخلوصات، الأوزان، قدرة الماكينات الأرضية، وتوليد ملفات DXF معتمدة")
+    st.caption("نظام حساب تقسيم الألواح، الأوزان، شاسيهات التركيب، وتوليد ملفات DXF الإنشائية")
 
+    # الشريط الجانبي
     st.sidebar.header("⚙️ مواصفات الزجاج والإكسسوارات")
     glass_thick = st.sidebar.selectbox("سمك الزجاج (مم)", [10, 12, 15, 19], index=1)
     glass_type = st.sidebar.selectbox("نوع الزجاج", ["شفاف (Clear)", "سوبر شفاف (Extra Clear)", "فاميه / مظلل (Tinted)", "مثلج (Frosted)"])
@@ -270,8 +258,22 @@ def main():
     hardware_finish = st.sidebar.selectbox("تشطيب الإكسسوارات", ["S.S Satin (ستانلس مط)", "Polished Chrome (كروم لامع)", "Matte Black (أسود مط)", "Brushed Gold (ذهبي)"])
 
     st.sidebar.markdown("---")
-    st.sidebar.header("📏 نطاقات الخلوصات والفواصل (مم)")
+    st.sidebar.header("🛠️ شاسية التركيب وتقسيم الألواح")
+    max_glass_width = st.sidebar.number_input("أقصى عرض مسموح للوح الثابت (مم)", value=1200.0, step=100.0)
+    chassis_type = st.sidebar.selectbox("نوع شاسية / قطاع التثبيت", [
+        "قطاع ألومنيوم ظاهري U-Channel (30x35mm)",
+        "مجرى ستانلس ستيل غاطس بالبلاط (Recessed SS Channel)",
+        "كبسات تثبيت نقطية (Glass Patch Clamps)",
+        "نظام أذرع السبايدر (Spider Glass Fittings)"
+    ])
+    anchor_type = st.sidebar.selectbox("نوع براغي التثبيت الإنشائي", [
+        "خوابير توسع M8 x 65mm (Expansion Anchor Bolts)",
+        "براغي تثبيت خرسانة M8 (Concrete Screw Anchors)",
+        "براغي تثبيت للحديد (Self-Tapping Screws for Steel Frame)"
+    ])
 
+    st.sidebar.markdown("---")
+    st.sidebar.header("📏 نطاقات الخلوصات والفواصل (مم)")
     g_bot_nom = st.sidebar.slider("خلوص أسفل الباب (G_bot)", min_value=6.0, max_value=12.0, value=8.0, step=0.5)
     g_top_nom = st.sidebar.slider("فاصل أعلى الباب / الفرامة (G_top)", min_value=3.0, max_value=6.0, value=4.0, step=0.5)
     g_mid_nom = st.sidebar.slider("فاصل دلففتي الباب المزدوج (G_mid)", min_value=3.0, max_value=6.0, value=4.0, step=0.5)
@@ -286,6 +288,7 @@ def main():
         "G_frame": {"min": 4.0, "nom": g_frame_nom, "max": 10.0}
     }
 
+    # الواجهة الرئيسية
     col_template, col_dims = st.columns([1, 2])
 
     with col_template:
@@ -345,7 +348,7 @@ def main():
         m4.metric("قدرة الماكينة الأرضية", "Heavy Duty EN5", delta="سعة حتى 150 كجم")
     else:
         m4.metric("قدرة الماكينة الأرضية", "تجاوز الوزن!", delta="-خطر غير آمن", delta_color="inverse")
-        st.error("⚠️ تحذير فني: وزن دلفة الباب يتجاوز 150 كجم! يجب تقليل أبعاد الباب أو استخدام سمك زجاج أقل أو نظام مفصلات شاقة.")
+        st.error("⚠️ تحذير فني: وزن دلفة الباب يتجاوز 150 كجم! يجب تقليل أبعاد الباب أو استخدام سمك زجاج أقل.")
 
     st.markdown("---")
     st.subheader("💾 تصدير الرسم التنفيذي بصيغة أوتوكاد DXF")
@@ -357,6 +360,9 @@ def main():
         W_door=W_door,
         H_door=H_door,
         X_door=X_door,
+        max_glass_width=max_glass_width,
+        chassis_type=chassis_type,
+        anchor_type=anchor_type,
         glass_thick=glass_thick,
         glass_type=glass_type,
         glass_color=glass_color,
